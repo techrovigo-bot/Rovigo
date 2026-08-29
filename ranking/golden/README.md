@@ -29,7 +29,7 @@ Níveis de idioma válidos: `reading, basic, conversational, intermediate, advan
 bun run src/eval.ts golden/golden-set.example.jsonl
 
 # gates + scoring do LLM
-OPENROUTER_API_KEY=... RANK_MODEL=anthropic/claude-3.5-haiku bun run src/eval.ts golden/meu-golden.jsonl
+OPENROUTER_API_KEY=... RANK_MODEL=anthropic/claude-haiku-4.5 bun run src/eval.ts golden/meu-golden.jsonl
 ```
 
 ## Critério de aceite (antes de promover um prompt/modelo)

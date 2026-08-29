@@ -42,7 +42,7 @@ Cadência diária: **ingest 06:00 → embed-jobs 06:30 → rank 07:00 → notify
 | `RANK_SERVICE_URL` | rank | ex.: `http://rank-service:8090` |
 | `RANK_SERVICE_TOKEN` | rank | Bearer do rank-service |
 | `OPENROUTER_API_KEY` | rank | chave do provedor de LLM |
-| `RANK_MODEL` | rank | opcional; default `anthropic/claude-3.5-haiku` |
+| `RANK_MODEL` | rank | opcional; default `anthropic/claude-haiku-4.5` |
 | `OPENAI_API_KEY` | embed | embeddings (`text-embedding-3-small`) |
 | `EMBED_MODEL` `EMBED_MAX` `EMBED_BATCH` | embed | opcionais; default `text-embedding-3-small`, 500, 100 |
 | `EVOLUTION_URL` `EVOLUTION_INSTANCE` `EVOLUTION_API_KEY` | notify | WhatsApp via Evolution API (beta) |

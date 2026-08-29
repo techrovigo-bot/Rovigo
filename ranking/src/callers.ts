@@ -6,7 +6,7 @@ export type LlmCaller = (system: string, user: string) => Promise<string>
 
 /** OpenRouter (barato, multi-modelo). Requer OPENROUTER_API_KEY.
  *  Modelo default sugerido para triagem: um modelo pequeno e barato. */
-export function makeOpenRouterCaller(model = process.env.RANK_MODEL ?? "anthropic/claude-3.5-haiku"): LlmCaller {
+export function makeOpenRouterCaller(model = process.env.RANK_MODEL ?? "anthropic/claude-haiku-4.5"): LlmCaller {
   const key = process.env.OPENROUTER_API_KEY
   if (!key) throw new Error("OPENROUTER_API_KEY não definido")
   return async (system, user) => {

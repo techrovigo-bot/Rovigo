@@ -10,7 +10,7 @@ const KEY = $env.SUPABASE_SERVICE_KEY
 const RANK = $env.RANK_SERVICE_URL
 const RTOK = $env.RANK_SERVICE_TOKEN
 const OR = $env.OPENROUTER_API_KEY
-const MODEL = $env.RANK_MODEL || 'anthropic/claude-3.5-haiku'
+const MODEL = $env.RANK_MODEL || 'anthropic/claude-haiku-4.5'
 const h = this.helpers
 const supaHeaders = { apikey: KEY, Authorization: `Bearer ${KEY}` }
 
@@ -100,25 +100,30 @@ for (const t of tenants) {
     })
   }
 
-  // Linhas de job_matches: vetados (sem score) + avaliados.
+  // Linhas de job_matches: vetados (sem score) + avaliados. PostgREST exige
+  // que TODAS as linhas de um insert em lote tenham exatamente as mesmas
+  // chaves — por isso todo objeto abaixo declara o conjunto completo de
+  // campos, com null onde não se aplica.
   const matchRows = []
   for (const v of prep.vetoed || []) {
     matchRows.push({
       tenant_id: t.id, job_id: v.jobId, status: 'ranked',
+      score: null, score_technical: null, score_experience: null, score_behavioral: null, score_career: null,
+      verdict: null,
       location_verdict: mapVerdict(v.locationVerdict),
       language_verdict: mapVerdict(v.languageVerdict),
       language_note: v.languageNote ?? null,
-      gaps: v.gaps || [], strengths: [], model: null,
+      strengths: [], gaps: v.gaps || [], model: null,
     })
   }
   for (const r of judged.results || []) {
     matchRows.push({
       tenant_id: t.id, job_id: r.jobId, status: 'ranked',
       score: r.overall ?? null,
-      score_technical: r.scores && r.scores.technical,
-      score_experience: r.scores && r.scores.experience,
-      score_behavioral: r.scores && r.scores.behavioral,
-      score_career: r.scores && r.scores.career,
+      score_technical: (r.scores && r.scores.technical) ?? null,
+      score_experience: (r.scores && r.scores.experience) ?? null,
+      score_behavioral: (r.scores && r.scores.behavioral) ?? null,
+      score_career: (r.scores && r.scores.career) ?? null,
       verdict: r.verdict ?? null,
       location_verdict: mapVerdict(r.locationVerdict),
       language_verdict: mapVerdict(r.languageVerdict),
