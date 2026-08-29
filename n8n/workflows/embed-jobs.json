@@ -1,0 +1,56 @@
+{
+  "name": "embed-jobs",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Corpo do nó Code \"Embutir vagas\" (workflow embed-jobs).\n// Run Once for All Items. Pega vagas sem embedding, gera vetores no OpenAI em\n// lote e grava via RPC set_job_embeddings. Roda entre o ingest e o rank.\n// Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, OPENAI_API_KEY,\n//      EMBED_MODEL (default text-embedding-3-small), EMBED_MAX (500), EMBED_BATCH (100).\n\nconst SUPA = $env.SUPABASE_URL\nconst KEY = $env.SUPABASE_SERVICE_KEY\nconst OA = $env.OPENAI_API_KEY\nconst MODEL = $env.EMBED_MODEL || 'text-embedding-3-small'\nconst MAX = Number($env.EMBED_MAX || 500)\nconst BATCH = Number($env.EMBED_BATCH || 100)\nconst h = this.helpers\nconst supa = { apikey: KEY, Authorization: `Bearer ${KEY}` }\n\n// Vagas ainda sem embedding, mais recentes primeiro (limita custo por run).\nconst jobs = await h.httpRequest({\n  method: 'GET',\n  url: `${SUPA}/rest/v1/jobs?embedding=is.null&order=first_seen_at.desc&limit=${MAX}&select=id,title,company,description`,\n  headers: supa,\n  json: true,\n})\nif (!jobs || !jobs.length) return [{ json: { embedded: 0 } }]\n\nconst buildText = (j) => `${j.title || ''}\\n${j.company || ''}\\n${(j.description || '').slice(0, 2000)}`.trim()\n\nlet embedded = 0\nlet tokensIn = 0\nfor (let i = 0; i < jobs.length; i += BATCH) {\n  const chunk = jobs.slice(i, i + BATCH)\n  const input = chunk.map(buildText)\n  const resp = await h.httpRequest({\n    method: 'POST',\n    url: 'https://api.openai.com/v1/embeddings',\n    headers: { Authorization: `Bearer ${OA}`, 'Content-Type': 'application/json' },\n    body: { model: MODEL, input },\n    json: true,\n  })\n  // resp.data[i].index mapeia de volta para o texto do input.\n  const rows = resp.data.map((d) => ({ id: chunk[d.index].id, embedding: d.embedding }))\n  await h.httpRequest({\n    method: 'POST',\n    url: `${SUPA}/rest/v1/rpc/set_job_embeddings`,\n    headers: { ...supa, 'Content-Type': 'application/json' },\n    body: { p: rows },\n    json: true,\n  })\n  embedded += rows.length\n  tokensIn += (resp.usage && resp.usage.prompt_tokens) || 0\n}\n\nif (tokensIn) {\n  await h.httpRequest({\n    method: 'POST', url: `${SUPA}/rest/v1/llm_usage`,\n    headers: { ...supa, Prefer: 'return=minimal' },\n    body: [{ workflow: 'embed-jobs', model: MODEL, tokens_in: tokensIn, tokens_out: 0 }],\n    json: true,\n  })\n}\n\nreturn [{ json: { embedded, tokens_in: tokensIn } }]\n"
+      },
+      "id": "code0",
+      "name": "Embutir vagas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        [
+          {
+            "node": "Embutir vagas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

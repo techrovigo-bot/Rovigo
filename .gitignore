@@ -1,0 +1,33 @@
+# Dependências
+node_modules/
+.pnp/
+bun.lockb
+
+# Ambiente e segredos — NUNCA versionar
+.env
+.env.*
+!.env.example
+*.key
+service_role*.txt
+
+# Supabase local
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+
+# Build / Next.js (painel, v1)
+.next/
+dist/
+out/
+build/
+
+# Dados pessoais de candidatos (nunca no git)
+data/
+exports/
+*.csv
+*.pdf
+
+# Sistema
+.DS_Store
+Thumbs.db
+*.log

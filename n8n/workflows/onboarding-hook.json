@@ -1,0 +1,103 @@
+{
+  "name": "onboarding-hook",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "onboarding",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "onboarding"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Corpo do nó Code \"Embutir perfil\" (primeiro nó do onboarding-hook).\n// Run Once for All Items. Lê tenant_id do input (webhook), gera o embedding do\n// perfil no OpenAI, grava via RPC set_profile_embedding e propaga o tenant_id\n// adiante para o nó Rank. O painel chama /webhook/onboarding no cadastro E em\n// toda atualização de perfil, então o embedding fica sempre fresco.\n// Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, OPENAI_API_KEY, EMBED_MODEL.\n\nconst SUPA = $env.SUPABASE_URL\nconst KEY = $env.SUPABASE_SERVICE_KEY\nconst OA = $env.OPENAI_API_KEY\nconst MODEL = $env.EMBED_MODEL || 'text-embedding-3-small'\nconst h = this.helpers\nconst supa = { apikey: KEY, Authorization: `Bearer ${KEY}` }\n\nconst firstIn = $input.all().length && $input.all()[0].json ? $input.all()[0].json : {}\nconst tenant = firstIn.tenant_id || (firstIn.body && firstIn.body.tenant_id) || null\nif (!tenant) return [{ json: { error: 'sem tenant_id no input' } }]\n\nconst profs = await h.httpRequest({\n  method: 'GET',\n  url: `${SUPA}/rest/v1/profiles?tenant_id=eq.${tenant}&select=target_roles,skills,seniority,headline,professional_history`,\n  headers: supa,\n  json: true,\n})\nconst p = profs && profs[0]\nif (!p) return [{ json: { tenant_id: tenant, warning: 'perfil não encontrado' } }]\n\nconst text = [\n  (p.target_roles || []).join(', '),\n  (p.skills || []).join(', '),\n  p.seniority || '',\n  p.headline || '',\n  p.professional_history ? JSON.stringify(p.professional_history).slice(0, 2000) : '',\n].filter(Boolean).join('\\n')\n\nconst resp = await h.httpRequest({\n  method: 'POST',\n  url: 'https://api.openai.com/v1/embeddings',\n  headers: { Authorization: `Bearer ${OA}`, 'Content-Type': 'application/json' },\n  body: { model: MODEL, input: text || '(perfil vazio)' },\n  json: true,\n})\nconst vec = resp.data[0].embedding\n\nawait h.httpRequest({\n  method: 'POST',\n  url: `${SUPA}/rest/v1/rpc/set_profile_embedding`,\n  headers: { ...supa, 'Content-Type': 'application/json' },\n  body: { p_tenant: tenant, p_embedding: JSON.stringify(vec) },\n  json: true,\n})\n\nif (resp.usage && resp.usage.prompt_tokens) {\n  await h.httpRequest({\n    method: 'POST', url: `${SUPA}/rest/v1/llm_usage`,\n    headers: { ...supa, Prefer: 'return=minimal' },\n    body: [{ tenant_id: tenant, workflow: 'embed-profile', model: MODEL, tokens_in: resp.usage.prompt_tokens, tokens_out: 0 }],\n    json: true,\n  })\n}\n\n// Propaga tenant_id para o nó Rank (próximo na cadeia do onboarding).\nreturn [{ json: { tenant_id: tenant, embedded: true } }]\n"
+      },
+      "id": "code0",
+      "name": "Embutir perfil",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Corpo do nó Code \"Rank por tenant\" (workflow rank-daily).\n// Run Once for All Items. Orquestra: tenants → RPC de vagas candidatas →\n// rank-service /prepare (gates + prompt) → OpenRouter (LLM) → /assemble (score)\n// → upsert em job_matches + telemetria em llm_usage.\n// Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, RANK_SERVICE_URL, RANK_SERVICE_TOKEN,\n//      OPENROUTER_API_KEY, RANK_MODEL (opcional).\n\nconst SUPA = $env.SUPABASE_URL\nconst KEY = $env.SUPABASE_SERVICE_KEY\nconst RANK = $env.RANK_SERVICE_URL\nconst RTOK = $env.RANK_SERVICE_TOKEN\nconst OR = $env.OPENROUTER_API_KEY\nconst MODEL = $env.RANK_MODEL || 'anthropic/claude-3.5-haiku'\nconst h = this.helpers\nconst supaHeaders = { apikey: KEY, Authorization: `Bearer ${KEY}` }\n\nconst mapVerdict = (v) => (v === 'pass' || v === 'fail' || v === 'flag' ? v : null)\n\n// tenant_id opcional do input: onboarding-hook (webhook) passa um; o cron não\n// passa nada e ranqueia todos os tenants com direito.\nconst inItems = $input.all()\nconst firstIn = inItems.length && inItems[0].json ? inItems[0].json : {}\nconst singleTenant = firstIn.tenant_id || (firstIn.body && firstIn.body.tenant_id) || null\n\n// Billing: no cron, expira os trials vencidos antes de selecionar (mantém o\n// status coerente na UI). No modo single (onboarding), não precisa.\nif (!singleTenant) {\n  try {\n    await h.httpRequest({ method: 'POST', url: `${SUPA}/rest/v1/rpc/expire_trials`, headers: { ...supaHeaders, 'Content-Type': 'application/json' }, body: {}, json: true })\n  } catch (e) { /* segue mesmo se falhar */ }\n}\n\n// Entitlement: pagos ativos, ou trials ainda no prazo.\nconst nowIso = new Date().toISOString()\nconst tenantsUrl = singleTenant\n  ? `${SUPA}/rest/v1/tenants?id=eq.${singleTenant}&select=id,profiles(*)`\n  : `${SUPA}/rest/v1/tenants?subscription_status=eq.active&or=(tier.neq.trial,trial_ends_at.gt.${nowIso})&select=id,profiles(*)`\nconst tenants = await h.httpRequest({ method: 'GET', url: tenantsUrl, headers: supaHeaders, json: true })\n\nconst summary = []\nfor (const t of tenants) {\n  const prof = Array.isArray(t.profiles) ? t.profiles[0] : t.profiles\n  if (!prof) continue\n\n  const profile = {\n    targetRoles: prof.target_roles || [],\n    seniority: prof.seniority || undefined,\n    cities: prof.cities || [],\n    acceptsWorkModels: prof.accepts_work_models || [],\n    languages: prof.languages || [],\n    skills: prof.skills || [],\n    contractPreference: prof.contract_preference || 'any',\n    summary: prof.headline || (prof.professional_history ? JSON.stringify(prof.professional_history) : undefined),\n  }\n\n  // Vagas candidatas (recentes, não avaliadas, ordenadas por pgvector).\n  const jobsRaw = await h.httpRequest({\n    method: 'POST',\n    url: `${SUPA}/rest/v1/rpc/jobs_for_tenant`,\n    headers: { ...supaHeaders, 'Content-Type': 'application/json' },\n    body: { p_tenant: t.id, p_limit: 30, p_days: 3 },\n    json: true,\n  })\n  if (!jobsRaw || !jobsRaw.length) continue\n\n  const jobs = jobsRaw.map((j) => ({\n    id: j.id, source: j.source, title: j.title, company: j.company,\n    location: j.location, workModel: j.work_model, description: j.description,\n    contractType: j.contract_type || null, deadline: j.deadline,\n  }))\n\n  // Estágio 1 + prompt.\n  const prep = await h.httpRequest({\n    method: 'POST', url: `${RANK}/prepare`,\n    headers: { Authorization: `Bearer ${RTOK}` },\n    body: { profile, jobs }, json: true,\n  })\n\n  let judged = { results: [] }\n  let usage = {}\n  if (prep.survivors && prep.survivors.length) {\n    const llm = await h.httpRequest({\n      method: 'POST', url: 'https://openrouter.ai/api/v1/chat/completions',\n      headers: { Authorization: `Bearer ${OR}`, 'Content-Type': 'application/json' },\n      body: {\n        model: MODEL, temperature: 0, response_format: { type: 'json_object' },\n        messages: [\n          { role: 'system', content: prep.system },\n          { role: 'user', content: prep.user },\n        ],\n      },\n      json: true,\n    })\n    const content = (llm.choices && llm.choices[0] && llm.choices[0].message && llm.choices[0].message.content) || '{}'\n    usage = llm.usage || {}\n    judged = await h.httpRequest({\n      method: 'POST', url: `${RANK}/assemble`,\n      headers: { Authorization: `Bearer ${RTOK}` },\n      body: { profile, survivors: prep.survivors, llm: content }, json: true,\n    })\n  }\n\n  // Linhas de job_matches: vetados (sem score) + avaliados.\n  const matchRows = []\n  for (const v of prep.vetoed || []) {\n    matchRows.push({\n      tenant_id: t.id, job_id: v.jobId, status: 'ranked',\n      location_verdict: mapVerdict(v.locationVerdict),\n      language_verdict: mapVerdict(v.languageVerdict),\n      language_note: v.languageNote ?? null,\n      gaps: v.gaps || [], strengths: [], model: null,\n    })\n  }\n  for (const r of judged.results || []) {\n    matchRows.push({\n      tenant_id: t.id, job_id: r.jobId, status: 'ranked',\n      score: r.overall ?? null,\n      score_technical: r.scores && r.scores.technical,\n      score_experience: r.scores && r.scores.experience,\n      score_behavioral: r.scores && r.scores.behavioral,\n      score_career: r.scores && r.scores.career,\n      verdict: r.verdict ?? null,\n      location_verdict: mapVerdict(r.locationVerdict),\n      language_verdict: mapVerdict(r.languageVerdict),\n      language_note: r.languageNote ?? null,\n      strengths: r.strengths || [], gaps: r.gaps || [], model: MODEL,\n    })\n  }\n\n  if (matchRows.length) {\n    await h.httpRequest({\n      method: 'POST',\n      url: `${SUPA}/rest/v1/job_matches?on_conflict=tenant_id,job_id`,\n      headers: { ...supaHeaders, Prefer: 'resolution=merge-duplicates,return=minimal' },\n      body: matchRows, json: true,\n    })\n  }\n\n  // Telemetria de custo (cost_brl fica no default 0; conversão de preço é passo futuro).\n  if (usage && usage.total_tokens) {\n    await h.httpRequest({\n      method: 'POST', url: `${SUPA}/rest/v1/llm_usage`,\n      headers: { ...supaHeaders, Prefer: 'return=minimal' },\n      body: [{\n        tenant_id: t.id, workflow: 'rank-daily', model: MODEL,\n        tokens_in: usage.prompt_tokens || 0, tokens_out: usage.completion_tokens || 0, meta: usage,\n      }],\n      json: true,\n    })\n  }\n\n  summary.push({\n    tenant: t.id, candidatas: jobs.length,\n    avaliadas: (judged.results || []).length, vetadas: (prep.vetoed || []).length,\n  })\n}\n\n// Em modo single (onboarding), propaga o tenant_id adiante para o nó Notify.\nconst out = { tenants: tenants.length, detalhe: summary }\nif (singleTenant) out.tenant_id = singleTenant\nreturn [{ json: out }]\n"
+      },
+      "id": "code1",
+      "name": "Rank por tenant",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Corpo do nó Code \"Notificar\" (workflows notify-daily e onboarding-hook).\n// Run Once for All Items. Envia o top-N de matches novos por tenant via WhatsApp\n// (Evolution API) com fallback e-mail (Resend), registra em notifications e marca\n// os matches como 'notified'. Só marca no envio bem-sucedido.\n// Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, EVOLUTION_URL, EVOLUTION_INSTANCE,\n//      EVOLUTION_API_KEY, RESEND_API_KEY, NOTIFY_FROM_EMAIL,\n//      NOTIFY_MIN_SCORE (default 60), NOTIFY_TOP (default 5), PANEL_URL (opcional).\n\nconst SUPA = $env.SUPABASE_URL\nconst KEY = $env.SUPABASE_SERVICE_KEY\nconst h = this.helpers\nconst supaHeaders = { apikey: KEY, Authorization: `Bearer ${KEY}` }\nconst MIN = Number($env.NOTIFY_MIN_SCORE || 60)\nconst TOP = Number($env.NOTIFY_TOP || 5)\nconst PANEL = $env.PANEL_URL || ''\n\n// tenant_id opcional (onboarding). Ausente = todos os elegíveis (cron).\nconst firstIn = $input.all().length && $input.all()[0].json ? $input.all()[0].json : {}\nconst singleTenant = firstIn.tenant_id || (firstIn.body && firstIn.body.tenant_id) || null\n\n// Quem notificar (RPC): tenants ativos com matches novos + contato.\nconst targets = await h.httpRequest({\n  method: 'POST',\n  url: `${SUPA}/rest/v1/rpc/tenants_to_notify`,\n  headers: { ...supaHeaders, 'Content-Type': 'application/json' },\n  body: { p_tenant: singleTenant },\n  json: true,\n})\n\nasync function sendWhatsApp(number, text) {\n  const url = $env.EVOLUTION_URL, inst = $env.EVOLUTION_INSTANCE, key = $env.EVOLUTION_API_KEY\n  if (!url || !inst || !key) return false\n  await h.httpRequest({\n    method: 'POST',\n    url: `${url}/message/sendText/${inst}`,\n    headers: { apikey: key, 'Content-Type': 'application/json' },\n    body: { number, text },\n    json: true,\n  })\n  return true\n}\n\nasync function sendEmail(to, subject, text) {\n  const key = $env.RESEND_API_KEY, from = $env.NOTIFY_FROM_EMAIL\n  if (!key || !from || !to) return false\n  await h.httpRequest({\n    method: 'POST',\n    url: 'https://api.resend.com/emails',\n    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },\n    body: { from, to, subject, text },\n    json: true,\n  })\n  return true\n}\n\nconst summary = []\nfor (const t of targets) {\n  // Top-N matches novos (ranked, score alto), com dados da vaga embutidos.\n  const matches = await h.httpRequest({\n    method: 'GET',\n    url: `${SUPA}/rest/v1/job_matches?tenant_id=eq.${t.tenant_id}&status=eq.ranked&score=gte.${MIN}&order=score.desc&limit=${TOP}&select=job_id,score,verdict,jobs(title,company,url)`,\n    headers: supaHeaders,\n    json: true,\n  })\n  if (!matches || !matches.length) continue\n\n  const lines = matches.map((m) => {\n    const j = m.jobs || {}\n    return `• ${j.title || 'Vaga'}${j.company ? ' — ' + j.company : ''} (fit ${m.score})\\n  ${j.url || ''}`\n  })\n  const text = `Novas vagas com bom fit pra você:\\n\\n${lines.join('\\n\\n')}${PANEL ? `\\n\\nVer todas: ${PANEL}` : ''}`\n  const subject = `${matches.length} nova(s) vaga(s) com bom fit`\n\n  // Envio: WhatsApp com consentimento, senão e-mail.\n  let channel = null\n  try {\n    if (t.whatsapp_number && t.whatsapp_consent_at && (await sendWhatsApp(t.whatsapp_number, text))) {\n      channel = 'whatsapp'\n    } else if (await sendEmail(t.email, subject, text)) {\n      channel = 'email'\n    }\n  } catch (e) {\n    // falha de envio: não marca como notificado, tenta de novo amanhã\n    summary.push({ tenant: t.tenant_id, erro: String(e.message || e) })\n    continue\n  }\n  if (!channel) {\n    summary.push({ tenant: t.tenant_id, pulado: 'sem canal (WhatsApp sem consentimento e e-mail não configurado)' })\n    continue\n  }\n\n  const matchIds = matches.map((m) => m.job_id)\n\n  // Registra a notificação.\n  await h.httpRequest({\n    method: 'POST', url: `${SUPA}/rest/v1/notifications`,\n    headers: { ...supaHeaders, Prefer: 'return=minimal' },\n    body: [{ tenant_id: t.tenant_id, channel, status: 'sent', match_ids: matchIds, payload: { text }, sent_at: new Date().toISOString() }],\n    json: true,\n  })\n\n  // Marca os matches enviados como 'notified' (não voltam no próximo envio).\n  const inList = matchIds.map((id) => `\"${id}\"`).join(',')\n  await h.httpRequest({\n    method: 'PATCH',\n    url: `${SUPA}/rest/v1/job_matches?tenant_id=eq.${t.tenant_id}&job_id=in.(${inList})`,\n    headers: { ...supaHeaders, Prefer: 'return=minimal' },\n    body: { status: 'notified' },\n    json: true,\n  })\n\n  summary.push({ tenant: t.tenant_id, canal: channel, enviadas: matchIds.length })\n}\n\nreturn [{ json: { alvos: targets.length, detalhe: summary } }]\n"
+      },
+      "id": "code2",
+      "name": "Notificar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Embutir perfil",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embutir perfil": {
+      "main": [
+        [
+          {
+            "node": "Rank por tenant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rank por tenant": {
+      "main": [
+        [
+          {
+            "node": "Notificar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

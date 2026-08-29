@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "rank-output",
+  "description": "Saída do nó LLM de ranking (estágio 3). Um item por vaga do lote.",
+  "type": "object",
+  "required": ["results"],
+  "additionalProperties": false,
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["jobId", "technical", "experience", "behavioral", "career", "strengths", "gaps"],
+        "additionalProperties": false,
+        "properties": {
+          "jobId": { "type": "string", "minLength": 1 },
+          "technical": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "experience": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "behavioral": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "career": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "strengths": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 3 },
+          "gaps": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 3 },
+          "languageObservation": { "type": "string" },
+          "rationale": { "type": "string" }
+        }
+      }
+    }
+  }
+}

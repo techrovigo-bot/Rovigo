@@ -1,0 +1,73 @@
+# Stack local para o teste ponta a ponta do MVP.
+# Sobe os dois serviços internos + n8n (instância única — queue mode + Redis
+# ficam para produção). O Supabase é um projeto de dev hospedado (não é
+# dockerizado aqui); o painel roda à parte com `npm run dev`.
+#
+#   cp .env.example .env && docker compose up -d --build
+#
+# Variáveis: ver .env.example. As do n8n abaixo são lidas pelos Code nodes via
+# $env (N8N_BLOCK_ENV_ACCESS_IN_NODE=false libera o acesso).
+
+services:
+  portal-runner:
+    build: ./portal-runner
+    environment:
+      PORT: 8080
+      PORTAL_RUNNER_TOKEN: ${PORTAL_RUNNER_TOKEN:?defina no .env}
+      PORTAL_RUNNER_TIMEOUT_MS: 30000
+      PORTAL_RUNNER_DISABLED: ""
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  rank-service:
+    build: ./ranking
+    environment:
+      PORT: 8090
+      RANK_SERVICE_TOKEN: ${RANK_SERVICE_TOKEN:?defina no .env}
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+
+  n8n:
+    image: n8nio/n8n:latest
+    depends_on:
+      - portal-runner
+      - rank-service
+    ports:
+      - "5678:5678"
+    environment:
+      # Servidor / webhook
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://localhost:5678/
+      GENERIC_TIMEZONE: America/Sao_Paulo
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"   # Code nodes leem $env
+      N8N_RUNNERS_ENABLED: "true"
+      # Vars usadas pelos workflows (Code nodes)
+      SUPABASE_URL: ${SUPABASE_URL:?}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:?}
+      PORTAL_RUNNER_URL: http://portal-runner:8080
+      PORTAL_RUNNER_TOKEN: ${PORTAL_RUNNER_TOKEN:?}
+      RANK_SERVICE_URL: http://rank-service:8090
+      RANK_SERVICE_TOKEN: ${RANK_SERVICE_TOKEN:?}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      RANK_MODEL: ${RANK_MODEL:-anthropic/claude-3.5-haiku}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      EMBED_MODEL: ${EMBED_MODEL:-text-embedding-3-small}
+      EVOLUTION_URL: ${EVOLUTION_URL:-}
+      EVOLUTION_INSTANCE: ${EVOLUTION_INSTANCE:-}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      NOTIFY_FROM_EMAIL: ${NOTIFY_FROM_EMAIL:-}
+      NOTIFY_MIN_SCORE: ${NOTIFY_MIN_SCORE:-60}
+      NOTIFY_TOP: ${NOTIFY_TOP:-5}
+      PANEL_URL: ${PANEL_URL:-http://localhost:3000/vagas}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/workflows:ro   # o script e2e usa `n8n execute --file=/workflows/...`
+    restart: unless-stopped
+
+volumes:
+  n8n_data: {}

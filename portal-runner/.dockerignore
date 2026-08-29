@@ -1,0 +1,8 @@
+node_modules
+test
+*.md
+.env
+.env.*
+**/*.test.ts
+**/tests
+.git

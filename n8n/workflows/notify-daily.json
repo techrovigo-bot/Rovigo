@@ -1,0 +1,56 @@
+{
+  "name": "notify-daily",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Corpo do nó Code \"Notificar\" (workflows notify-daily e onboarding-hook).\n// Run Once for All Items. Envia o top-N de matches novos por tenant via WhatsApp\n// (Evolution API) com fallback e-mail (Resend), registra em notifications e marca\n// os matches como 'notified'. Só marca no envio bem-sucedido.\n// Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, EVOLUTION_URL, EVOLUTION_INSTANCE,\n//      EVOLUTION_API_KEY, RESEND_API_KEY, NOTIFY_FROM_EMAIL,\n//      NOTIFY_MIN_SCORE (default 60), NOTIFY_TOP (default 5), PANEL_URL (opcional).\n\nconst SUPA = $env.SUPABASE_URL\nconst KEY = $env.SUPABASE_SERVICE_KEY\nconst h = this.helpers\nconst supaHeaders = { apikey: KEY, Authorization: `Bearer ${KEY}` }\nconst MIN = Number($env.NOTIFY_MIN_SCORE || 60)\nconst TOP = Number($env.NOTIFY_TOP || 5)\nconst PANEL = $env.PANEL_URL || ''\n\n// tenant_id opcional (onboarding). Ausente = todos os elegíveis (cron).\nconst firstIn = $input.all().length && $input.all()[0].json ? $input.all()[0].json : {}\nconst singleTenant = firstIn.tenant_id || (firstIn.body && firstIn.body.tenant_id) || null\n\n// Quem notificar (RPC): tenants ativos com matches novos + contato.\nconst targets = await h.httpRequest({\n  method: 'POST',\n  url: `${SUPA}/rest/v1/rpc/tenants_to_notify`,\n  headers: { ...supaHeaders, 'Content-Type': 'application/json' },\n  body: { p_tenant: singleTenant },\n  json: true,\n})\n\nasync function sendWhatsApp(number, text) {\n  const url = $env.EVOLUTION_URL, inst = $env.EVOLUTION_INSTANCE, key = $env.EVOLUTION_API_KEY\n  if (!url || !inst || !key) return false\n  await h.httpRequest({\n    method: 'POST',\n    url: `${url}/message/sendText/${inst}`,\n    headers: { apikey: key, 'Content-Type': 'application/json' },\n    body: { number, text },\n    json: true,\n  })\n  return true\n}\n\nasync function sendEmail(to, subject, text) {\n  const key = $env.RESEND_API_KEY, from = $env.NOTIFY_FROM_EMAIL\n  if (!key || !from || !to) return false\n  await h.httpRequest({\n    method: 'POST',\n    url: 'https://api.resend.com/emails',\n    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },\n    body: { from, to, subject, text },\n    json: true,\n  })\n  return true\n}\n\nconst summary = []\nfor (const t of targets) {\n  // Top-N matches novos (ranked, score alto), com dados da vaga embutidos.\n  const matches = await h.httpRequest({\n    method: 'GET',\n    url: `${SUPA}/rest/v1/job_matches?tenant_id=eq.${t.tenant_id}&status=eq.ranked&score=gte.${MIN}&order=score.desc&limit=${TOP}&select=job_id,score,verdict,jobs(title,company,url)`,\n    headers: supaHeaders,\n    json: true,\n  })\n  if (!matches || !matches.length) continue\n\n  const lines = matches.map((m) => {\n    const j = m.jobs || {}\n    return `• ${j.title || 'Vaga'}${j.company ? ' — ' + j.company : ''} (fit ${m.score})\\n  ${j.url || ''}`\n  })\n  const text = `Novas vagas com bom fit pra você:\\n\\n${lines.join('\\n\\n')}${PANEL ? `\\n\\nVer todas: ${PANEL}` : ''}`\n  const subject = `${matches.length} nova(s) vaga(s) com bom fit`\n\n  // Envio: WhatsApp com consentimento, senão e-mail.\n  let channel = null\n  try {\n    if (t.whatsapp_number && t.whatsapp_consent_at && (await sendWhatsApp(t.whatsapp_number, text))) {\n      channel = 'whatsapp'\n    } else if (await sendEmail(t.email, subject, text)) {\n      channel = 'email'\n    }\n  } catch (e) {\n    // falha de envio: não marca como notificado, tenta de novo amanhã\n    summary.push({ tenant: t.tenant_id, erro: String(e.message || e) })\n    continue\n  }\n  if (!channel) {\n    summary.push({ tenant: t.tenant_id, pulado: 'sem canal (WhatsApp sem consentimento e e-mail não configurado)' })\n    continue\n  }\n\n  const matchIds = matches.map((m) => m.job_id)\n\n  // Registra a notificação.\n  await h.httpRequest({\n    method: 'POST', url: `${SUPA}/rest/v1/notifications`,\n    headers: { ...supaHeaders, Prefer: 'return=minimal' },\n    body: [{ tenant_id: t.tenant_id, channel, status: 'sent', match_ids: matchIds, payload: { text }, sent_at: new Date().toISOString() }],\n    json: true,\n  })\n\n  // Marca os matches enviados como 'notified' (não voltam no próximo envio).\n  const inList = matchIds.map((id) => `\"${id}\"`).join(',')\n  await h.httpRequest({\n    method: 'PATCH',\n    url: `${SUPA}/rest/v1/job_matches?tenant_id=eq.${t.tenant_id}&job_id=in.(${inList})`,\n    headers: { ...supaHeaders, Prefer: 'return=minimal' },\n    body: { status: 'notified' },\n    json: true,\n  })\n\n  summary.push({ tenant: t.tenant_id, canal: channel, enviadas: matchIds.length })\n}\n\nreturn [{ json: { alvos: targets.length, detalhe: summary } }]\n"
+      },
+      "id": "code0",
+      "name": "Notificar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        [
+          {
+            "node": "Notificar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "name": "ingest-bucket",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Corpo do nó Code \"Ingest vagas\" (workflow ingest-bucket).\n// Run Once for All Items. Usa this.helpers.httpRequest (estável entre versões).\n// Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, PORTAL_RUNNER_URL, PORTAL_RUNNER_TOKEN.\n\nconst SUPA = $env.SUPABASE_URL\nconst KEY = $env.SUPABASE_SERVICE_KEY\nconst RUNNER = $env.PORTAL_RUNNER_URL\nconst RTOK = $env.PORTAL_RUNNER_TOKEN\nconst h = this.helpers\nconst supaHeaders = { apikey: KEY, Authorization: `Bearer ${KEY}` }\nconst ALLOWED = ['gupy', 'catho', 'vagas']\n\n// 1. Buckets ativos.\nconst buckets = await h.httpRequest({\n  method: 'GET',\n  url: `${SUPA}/rest/v1/search_buckets?active=eq.true&select=key,query_terms`,\n  headers: supaHeaders,\n  json: true,\n})\n\n// 2. Para cada bucket × portal × termo, chama o portal-runner. Erro de um\n//    portal não derruba a run (continue).\nconst rows = []\nconst seen = new Set()\nconst now = new Date().toISOString()\nfor (const b of buckets) {\n  const qt = b.query_terms || {}\n  for (const portal of Object.keys(qt)) {\n    if (!ALLOWED.includes(portal)) continue\n    for (const term of qt[portal] || []) {\n      let resp\n      try {\n        resp = await h.httpRequest({\n          method: 'POST',\n          url: `${RUNNER}/search`,\n          headers: { Authorization: `Bearer ${RTOK}` },\n          body: { portal, query: term, jobage: 14, limit: 20 },\n          json: true,\n        })\n      } catch (e) {\n        continue\n      }\n      for (const r of (resp && resp.results) || []) {\n        const key = `${portal}:${r.id}`\n        if (seen.has(key)) continue\n        seen.add(key)\n        rows.push({\n          source: portal,\n          external_id: String(r.id),\n          url: r.url,\n          title: r.title,\n          company: r.company ?? null,\n          location: r.location ?? null,\n          description: r.snippet ?? null,\n          posted_at: r.date ?? null,\n          last_seen_at: now, // first_seen_at NÃO é enviado: default no insert, preservado no upsert\n          raw: r,\n        })\n      }\n    }\n  }\n}\n\n// 3. Upsert em lotes (dedup por source+external_id). merge-duplicates atualiza\n//    os campos enviados; first_seen_at fica intacto porque não vai no corpo.\nlet upserted = 0\nfor (let i = 0; i < rows.length; i += 200) {\n  const chunk = rows.slice(i, i + 200)\n  await h.httpRequest({\n    method: 'POST',\n    url: `${SUPA}/rest/v1/jobs?on_conflict=source,external_id`,\n    headers: { ...supaHeaders, Prefer: 'resolution=merge-duplicates,return=minimal' },\n    body: chunk,\n    json: true,\n  })\n  upserted += chunk.length\n}\n\nreturn [{ json: { buckets: buckets.length, rows: rows.length, upserted } }]\n"
+      },
+      "id": "code0",
+      "name": "Ingest vagas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        [
+          {
+            "node": "Ingest vagas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

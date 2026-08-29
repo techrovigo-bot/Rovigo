@@ -1,0 +1,17 @@
+{
+  "name": "portal-runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Serviço HTTP que envolve os CLIs de portal de vagas (Gupy, Catho, Vagas.com) para o n8n, preservando o contrato JSON.",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch src/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
