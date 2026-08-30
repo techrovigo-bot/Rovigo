@@ -1,0 +1,17 @@
+{
+  "name": "docgen",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Geração de CV e carta por vaga: extração de perfil, drafter e auditoria de grounding.",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch src/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
