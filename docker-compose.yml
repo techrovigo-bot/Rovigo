@@ -29,6 +29,25 @@ services:
       - "8090:8090"
     restart: unless-stopped
 
+  docgen:
+    build: ./docgen
+    environment:
+      PORT: 8100
+      DOCGEN_SERVICE_TOKEN: ${DOCGEN_SERVICE_TOKEN:?defina no .env}
+    ports:
+      - "8100:8100"
+    restart: unless-stopped
+
+  # HTML -> PDF. Sem porta publicada de propósito: só a rede interna alcança.
+  # Um Gotenberg aberto na internet é SSRF e abuso de CPU de graça.
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    command:
+      - gotenberg
+      - --chromium-disable-javascript=true
+      - --chromium-allow-list=file:///tmp/.*
+    restart: unless-stopped
+
   n8n:
     image: n8nio/n8n:latest
     depends_on:
@@ -52,6 +71,10 @@ services:
       PORTAL_RUNNER_TOKEN: ${PORTAL_RUNNER_TOKEN:?}
       RANK_SERVICE_URL: http://rank-service:8090
       RANK_SERVICE_TOKEN: ${RANK_SERVICE_TOKEN:?}
+      DOCGEN_SERVICE_URL: http://docgen:8100
+      DOCGEN_SERVICE_TOKEN: ${DOCGEN_SERVICE_TOKEN:?}
+      GOTENBERG_URL: http://gotenberg:3000
+      DOC_MODEL: ${DOC_MODEL:-anthropic/claude-sonnet-4.5}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       RANK_MODEL: ${RANK_MODEL:-anthropic/claude-3.5-haiku}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
