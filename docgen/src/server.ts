@@ -9,6 +9,7 @@
 //   POST /prepare-review   {profile, job, draft}      -> {system, user}
 //   POST /audit            {profile, draft, llmReview}-> {report, clean}
 //   POST /render           {profile, draft}           -> {cvHtml, coverHtml}
+//   POST /pdf              {profile, draft}           -> {cvPdf, coverPdf} (base64)
 //
 // Auth: Authorization: Bearer <DOCGEN_SERVICE_TOKEN>. Sem token, POST -> 503.
 
@@ -23,6 +24,7 @@ import {
   audit,
 } from "./pipeline.js"
 import { renderCv, renderCoverLetter } from "./render.js"
+import { htmlToPdf, isPdf, toBase64, PdfError } from "./pdf.js"
 
 const TOKEN = process.env.DOCGEN_SERVICE_TOKEN ?? ""
 const PORT = Number(process.env.PORT ?? 8100)
@@ -57,6 +59,7 @@ const ROUTES = new Set([
   "/prepare-review",
   "/audit",
   "/render",
+  "/pdf",
 ])
 
 const server = Bun.serve({
@@ -121,13 +124,33 @@ const server = Bun.serve({
         return json(audit(profile!, draft, typeof llmReview === "string" ? llmReview : JSON.stringify(llmReview ?? {})))
       }
 
-      // /render
+      // --- render / pdf -----------------------------------------------------
       const draft = b.draft as Draft | undefined
       if (!draft) return json({ error: "campo 'draft' obrigatório", code: "NO_DRAFT" }, 400)
-      return json({
-        cvHtml: renderCv(profile!, draft.cv),
-        coverHtml: renderCoverLetter(profile!, draft.coverLetter),
-      })
+
+      const cvHtml = renderCv(profile!, draft.cv)
+      const coverHtml = renderCoverLetter(profile!, draft.coverLetter)
+
+      if (url.pathname === "/render") return json({ cvHtml, coverHtml })
+
+      // /pdf — converte no Gotenberg (rede interna) e devolve base64, que é o
+      // que o n8n consegue carregar adiante sem lidar com binário.
+      try {
+        const [cv, cover] = await Promise.all([htmlToPdf(cvHtml), htmlToPdf(coverHtml)])
+        // Um 200 que não começa com %PDF veio de outra coisa no caminho.
+        if (!isPdf(cv) || !isPdf(cover)) {
+          return json({ error: "resposta do Gotenberg não é um PDF", code: "NOT_PDF" }, 502)
+        }
+        return json({
+          cvPdf: toBase64(cv),
+          coverPdf: toBase64(cover),
+          cvBytes: cv.length,
+          coverBytes: cover.length,
+        })
+      } catch (e) {
+        if (e instanceof PdfError) return json({ error: e.message, code: "PDF_FAILED" }, e.status)
+        throw e
+      }
     }
 
     return json({ error: "not found", code: "NOT_FOUND" }, 404)
