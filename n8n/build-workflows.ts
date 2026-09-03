@@ -59,6 +59,10 @@ const workflows = {
     { file: "rank.code.js", name: "Rank por tenant" },
     { file: "notify.code.js", name: "Notificar" },
   ]),
+  // v2: sob demanda, disparado pelo painel quando o candidato pede os documentos.
+  "generate-docs": workflow("generate-docs", webhookTrigger("generate-docs"), [
+    { file: "generate-docs.code.js", name: "Gerar documentos" },
+  ]),
 }
 
 for (const [name, wf] of Object.entries(workflows)) {
